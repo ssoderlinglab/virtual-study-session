@@ -7,8 +7,8 @@ from virtual_lab.prompts import SCIENTIFIC_CRITIC
 from io import StringIO
 
 # Meetings constants
-num_iterations = 3
-num_rounds = 3
+num_iterations = 2
+num_rounds = 2
 
 # Models
 #"gpt-4o-2024-08-06"
@@ -16,8 +16,12 @@ num_rounds = 3
 model = "gpt-5"
 model_mini = model + '-mini'
 
+## my grant details
+grant_filepath = '/hpc/group/soderlinglab/tools/virtual-study-session/data/R35_MIRA_plan.txt'
+my_grant = StringIO(open(grant_filepath).read()).getvalue()
+
 # Discussion paths
-GRANTNAME = 'David_R35_MIRA'
+GRANTNAME = Path(grant_filepath).stem
 GRANTNAME_WRITE =  GRANTNAME + '_' + model
 discussions_dir = Path("discussions") / GRANTNAME_WRITE
 workflow_phases = [
@@ -25,6 +29,7 @@ workflow_phases = [
     "independent_review",
     "collaboration_review",
     "chair_merge",
+    "final_output"
 #     "pre_scoring_grant",
 #     "post_scoring_grant",
 #     "grant_specification",
@@ -41,10 +46,6 @@ finetuning_phases = ["finetuning"]
 review_phases = ["unpaired_cysteine"]
 phases = workflow_phases + ablations_phases + human_eval_phases + finetuning_phases + review_phases
 discussions_phase_to_dir = {phase: discussions_dir / phase for phase in phases}
-
-## my grant details
-
-my_grant = StringIO(open('/hpc/group/soderlinglab/tools/virtual-study-session/data/R35_MIRA_plan.txt').read()).getvalue()
 
 # Prompts
 
