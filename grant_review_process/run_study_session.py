@@ -11,8 +11,13 @@ from virtual_lab.prompts import (
     REWRITE_PROMPT,
     create_merge_prompt,
 )
+import time
+from virtual_lab.utils import (load_summaries, 
+                               write_final_summary,
+                               get_recent_markdown,
+                               clear_dir)
 
-from virtual_lab.utils import load_summaries
+from virtual_lab.agent import Agent
 
 from review_constants import (
     background_prompt,
@@ -43,29 +48,31 @@ import sys
 import re
 from io import StringIO
 
+conversation_id = None
 if '5' in model:
     from virtual_lab.run_meeting import run_meeting
 else:
     from virtual_lab.run_meeting_original_assistantAPI import run_meeting
 
-print('RUNNING ON MODEL: ', model)
- 
+### clear directories
+for d in discussions_phase_to_dir:
+    clear_dir(discussions_phase_to_dir[d])
+
 os.environ["TQDM_DISABLE"] = "1"
 
 # form_requirements = StringIO(open('/hpc/group/soderlinglab/tools/virtual-study-session/data/toy/form.txt').read()).getvalue()
 print('mygrant', my_grant[:100])
 
-s = 'this is my test string. will bibliography: be matched\nafter? let us check right'
-keyword = r'references'
-bibliography = re.search(fr'{keyword}(.*)', my_grant,flags=re.S | re.I).group(1)
-
 ORCID_number = '0000-0002-7599-1430'
 study_section_chair.expertise += ORCID_number
 
 ## search for aims
-result = re.search(r'^(.*?)RESEARCH STRATEGY', my_grant, re.DOTALL | re.IGNORECASE).group(1)
-aims = ','.join(sorted(list(set(re.findall(r'Aim\s*(\d)', result)))))
-
+research_strategy = re.search(r'^(.*?)RESEARCH STRATEGY', my_grant, re.DOTALL | re.IGNORECASE)
+if research_strategy:
+    research_result = research_strategy.group(1)
+    aims = ','.join(sorted(list(set(re.findall(r'Aim\s*(\d)', research_result)))))
+else:
+    aims = ''
 
 # ## Team selection
 # #### technicalities
@@ -102,7 +109,7 @@ Agent(
 
 # Team selection - discussion
 for iteration_num in range(num_iterations):
-    run_meeting(
+    _, conversation_id = run_meeting(
     meeting_type="individual",
     team_member=study_section_chair,
     agenda=team_selection_agenda,
@@ -111,16 +118,19 @@ for iteration_num in range(num_iterations):
     temperature=CREATIVE_TEMPERATURE,
     pubmed_search=True,
     contexts=(f'my_grant: {my_grant}',),
-)
+    conversation_id = conversation_id
+    )
+    time.sleep(5)
 
 # Team selection - merge
 team_selection_summaries = load_summaries(
-    discussion_paths=list(discussions_phase_to_dir["team_selection"].glob("discussion_*.json")))
+    discussion_paths=sorted(list(discussions_phase_to_dir["team_selection"].glob("discussion_*.json"))))
+
 print(f"Number of summaries: {len(team_selection_summaries)}")
 
 team_selection_merge_prompt = create_merge_prompt(agenda=team_selection_agenda)
 
-run_meeting(
+_, conversation_id = run_meeting(
     meeting_type="individual",
     team_member=study_section_chair,
     summaries=team_selection_summaries,
@@ -129,66 +139,89 @@ run_meeting(
     save_name="merged",
     temperature=CONSISTENT_TEMPERATURE,
     contexts=(f'Full text: {my_grant}',),
+    conversation_id = conversation_id
 )
 
+
 ## update team members
-team_members_selection_file = Path(discussions_phase_to_dir['team_selection']) / 'merged.md'
-with open(team_members_selection_file, 'r', encoding='utf-8') as f:
-    content = f.read()
+team_members_selection_file = Path(discussions_phase_to_dir['team_selection']) / 'merged.json'
+team_content = load_summaries([team_members_selection_file])[-1]
 
-header_pattern = (
+# -------- helpers --------
+# Capture the "Reviewer:", "Domain expertise:", "Focus across aims:", "Policy/rigor checks:", "Immediate requests to PI:" sections
+HEADER_PATTERN = (
     r"Reviewer:(.*?)"
-    r"Domain expertise:(.*?)"        # capture domain section
-    r"Focus across aims:(.*?)"       # capture focus section
-    r"Policy/rigor checks:(.*?)"     # capture policy section
-    r"Immediate requests to PI:(.*?)" # capture requests section
-    )
+    r"Domain expertise:(.*?)"
+    r"Focus across aims:(.*?)"
+    r"Policy/rigor checks:(.*?)"
+    r"Immediate requests to PI:(.*?)"
+)
 
-## get primary reviewer information + last match
-primaryR_pattern = r'(Primary Reviewer.*?)Secondary Reviewer'
-pr_match = re.findall(primaryR_pattern, content, flags=re.DOTALL)[-1]
-prHM = re.search(header_pattern, pr_match, flags=re.DOTALL | re.IGNORECASE)
-if prHM:
-    expertise = prHM.group(1).strip()
-    role = prHM.group(2).strip()
-    focus = prHM.group(3).strip()
-    policy = prHM.group(4).strip()
-    requests = prHM.group(5).strip()
+def extract_sections(block: str):
+    m = re.search(HEADER_PATTERN, block, flags=re.DOTALL | re.IGNORECASE)
+    if not m:
+        return None
+    reviewer_txt = m.group(1).strip()
+    domain_txt   = m.group(2).strip()
+    focus_txt    = m.group(3).strip()
+    policy_txt   = m.group(4).strip()
+    request_txt  = m.group(5).strip()
+    return reviewer_txt, domain_txt, focus_txt, policy_txt, request_txt
 
-# update Primary expertise 
-primary_reviewer.expertise += expertise
-primary_reviewer.role += re.sub(r'[-\s+]', ' ', role)
-primary_reviewer.goal += focus + policy +requests
+def clean_bullets_to_paragraph(txt: str) -> str:
+    # remove leading bullets/dashes per line, then collapse all whitespace
+    txt = re.sub(r'^\s*[-•]\s*', '', txt, flags=re.MULTILINE)
+    txt = re.sub(r'\s+', ' ', txt).strip()
+    return txt
 
+# -------- slice blocks for each reviewer --------
+# Primary: up to Secondary
+primary_block = re.search(r'(Primary Reviewer.*?)(?=Secondary Reviewer)', team_content, flags=re.DOTALL | re.IGNORECASE)
+# Secondary: between Secondary and Tertiary
+secondary_block = re.search(r'(Secondary Reviewer.*?)(?=Tertiary Reviewer)', team_content, flags=re.DOTALL | re.IGNORECASE)
+# Tertiary: to end of file
+tertiary_block = re.search(r'(Tertiary Reviewer.*)$', team_content, flags=re.DOTALL | re.IGNORECASE)
 
-secondary_reviewer.expertise += 'Molecular and Cellular Biochemistry Specialist'
-tertiary_reviewer.expertise += 'Computational Biology and AI Integration Specialist'
+# -------- PRIMARY --------
+if primary_block:
+    s = extract_sections(primary_block.group(1))
+    if s:
+        reviewer_txt, domain_txt, focus_txt, policy_txt, request_txt = s
+        primary_reviewer.expertise += ' ' + clean_bullets_to_paragraph(reviewer_txt)
+        primary_reviewer.role      += ' ' + clean_bullets_to_paragraph(domain_txt)
+        primary_reviewer.goal      += ' ' + clean_bullets_to_paragraph(focus_txt + ' ' + policy_txt + ' ' + request_txt)
 
+# -------- SECONDARY --------
+if secondary_block:
+    s = extract_sections(secondary_block.group(1))
+    if s:
+        reviewer_txt, domain_txt, focus_txt, policy_txt, request_txt = s
+        secondary_reviewer.expertise += ' ' + clean_bullets_to_paragraph(reviewer_txt)
+        secondary_reviewer.role      += ' ' + clean_bullets_to_paragraph(domain_txt)
+        secondary_reviewer.goal      += ' ' + clean_bullets_to_paragraph(focus_txt + ' ' + policy_txt + ' ' + request_txt)
+else:
+    # optional: keep your previous static fallback
+    # secondary_reviewer.expertise += ' Molecular and Cellular Biochemistry Specialist'
+    pass
 
-print('Primary Reviewer: ', primary_reviewer.expertise)
-print('Secondary Reviewer: ', secondary_reviewer.expertise)
-print('Tertiary Reviewer: ', tertiary_reviewer.expertise)
+# -------- TERTIARY --------
+if tertiary_block:
+    s = extract_sections(tertiary_block.group(1))
+    if s:
+        reviewer_txt, domain_txt, focus_txt, policy_txt, request_txt = s
+        tertiary_reviewer.expertise += ' ' + clean_bullets_to_paragraph(reviewer_txt)
+        tertiary_reviewer.role      += ' ' + clean_bullets_to_paragraph(domain_txt)
+        # If end is unknown, it's fine: this concatenates whatever was present (can be empty)
+        tertiary_reviewer.goal      += ' ' + clean_bullets_to_paragraph(focus_txt + ' ' + policy_txt + ' ' + request_txt)
+else:
+    # optional: keep your previous static fallback
+    # tertiary_reviewer.expertise += ' Computational Biology and AI Integration Specialist'
+    pass
 
-
-## update roles
-primary_reviewer.role += '''
-This reviewer will have a strong background in neurobiology with a focus on synaptic plasticity and neurotransmitter systems, particularly GABAergic transmission.
-'''
-
-secondary_reviewer.role += ''' With expertise in kinase signaling pathways, protein interactions, and post-translational modifications, this reviewer will focus on the biochemical and molecular aspects of the proposal.'''
-
-tertiary_reviewer.role += '''This reviewer should have expertise in computational biology, AI applications in life sciences, and the development of predictive models for biological processes.'''
-
-## update goals 
-primary_reviewer.goal += '''This reviewer will critically evaluate the biological significance and feasibility of the aims related to synaptic plasticity, ensuring that the described methodologies like iLTP induction, proximity phosphoproteomics, and kinome analysis are robust and scientifically sound. They will assess Aim 1 and 3 in detail.'''
-
-secondary_reviewer.goal += ''' They will scrutinize the methods involving kinase-substrate relationships, the use of proximity proteomics, and base editing technologies. They will predominantly focus on Aim 2, assessing the innovative use of genetically encoded inhibitors and the practical feasibility of the methodologies proposed.
-'''
-
-tertiary_reviewer.goal += ''' They will evaluate the use of AI and machine learning models like KolossuS and PepPrCLIP, ensuring that the computational approaches are state-of-the-art and effectively integrated into the research strategy. This reviewer will provide insights into the potential and limitations of these technologies within the context of the proposed research.
-'''
-
-
+# ---- debug prints ----
+print('Primary Reviewer expertise:', primary_reviewer.expertise)
+print('Secondary Reviewer expertise:', secondary_reviewer.expertise)
+print('Tertiary Reviewer expertise:', tertiary_reviewer.expertise)
 print('######## finished selecting reviewers!!!! ####### ')
 
 ## each reviewer independently evaluates.
@@ -211,7 +244,10 @@ for i, r in enumerate(reviewers):
         #     pubmed_search = True,
             temperature=CONSISTENT_TEMPERATURE,
             num_rounds=num_rounds,
-            contexts=(f'full text/propposal: : {my_grant}',))
+            contexts=(f'full text/propposal: : {my_grant}',),
+            conversation_id = conversation_id
+    )
+        time.sleep(5)
 
 
 print('######## finished independent review selection!!!! ####### ')
@@ -241,7 +277,8 @@ converge_summaries_questions = (
 'Debate the scores output from each reviewer and discuss which score to agree upon for each factor/aim correspondence.')
 
 independent_summaries  = load_summaries(
-    discussion_paths=list(discussions_phase_to_dir["independent_review"].glob("reviewer*.json")))
+    discussion_paths=sorted(list(discussions_phase_to_dir["independent_review"].glob("reviewer*.json"))))
+
 print(f"Number of independent summaries: {len(independent_summaries)}")
 
 
@@ -260,19 +297,20 @@ for n_iter in range(num_iterations):
         summaries = independent_summaries,
         temperature=CONSISTENT_TEMPERATURE,
         num_rounds=num_rounds,
-)
+        conversation_id = conversation_id)
+        time.sleep(5)
         
 print('######## finished converging summaries!!!! ####### ')
 
 
-
 ## study section chair merges  
 collaboration_summaries  = load_summaries(
-    discussion_paths=list(discussions_phase_to_dir["collaboration_review"].glob("converge*.json")))
+    discussion_paths=sorted(list(discussions_phase_to_dir["collaboration_review"].glob("converge*.json"))))
+
 print(f"Number of collaboration summaries: {len(collaboration_summaries)}")
 
 final_agenda = f'''Provide a final summary of the collaboration meetings and fill out {grant_scoring_form} as a consensus
-of summaries, and return it.'''
+of summaries, and return it. Please elongate/define all abbreviations.'''
 final_output_questions = ('Provide an executive summary of the discussion',
                          'What are the consensus strengths for each aim?',
                          'What are the weaknesses that were retained?',
@@ -290,16 +328,53 @@ for n_iter in range(num_iterations):
 #     pubmed_search = True,
     temperature=CONSISTENT_TEMPERATURE,
     num_rounds=num_rounds,
+    conversation_id = conversation_id
     )
-
+    time.sleep(5)
 
 print('######## study section chair has selected the final output ####### ')
 
 # --- Grant specification – merge ---
 final_output_summary = load_summaries(
-    discussion_paths=list(discussions_phase_to_dir["chair_merge"].glob("final*.json"))
-)
+    discussion_paths=sorted(list(discussions_phase_to_dir["chair_merge"].glob("final*.json"))
+))
 
-print(f'Final Output Summary:')
-print(final_output_summary[-1])
 
+## write out final summary
+final_summary = final_output_summary[-1]
+write_final_summary(discussions_phase_to_dir['final_output'], final_summary, GRANTNAME, 'chair_summary')
+
+
+## get last markdown file
+final_markdown = get_recent_markdown(discussions_phase_to_dir['chair_merge'])
+
+mentor_agent = Agent(
+        title="mentor",
+        expertise="Author and Literary Expert",
+        goal=f"Provide targeted feedback and fill out form:\n{grant_scoring_form}",
+        role=f"Act as a literary expert and return feedback on proposal based off {final_markdown} in letter format",
+        model=model,)
+
+out_agenda = f'Please fill out the grant scoring form {grant_scoring_form} and concisely yet targettedly, provide feedback in formal letter format to PI who wrote proposal on strengths, weaknesses, likely NIH decision, significance, and scores in all depts. Please elongate/define all abbreviations.'
+
+## run meeting with final markdown 
+run_meeting(
+    meeting_type="individual",
+    team_member=mentor_agent,  # PI resolves/merges
+    summaries=(final_markdown,),
+    agenda=out_agenda,
+    agenda_questions= final_output_questions,
+    save_dir=discussions_phase_to_dir["final_output"],
+    save_name=f"final_delivery",
+    #     pubmed_search = True,
+    temperature=CONSISTENT_TEMPERATURE,
+    num_rounds=num_rounds,
+    conversation_id = conversation_id
+    )
+
+
+mentor_out_summary = load_summaries(
+    discussion_paths=sorted(list(discussions_phase_to_dir["final_output"].glob("final_delivery.json"))
+))[-1]
+
+write_final_summary(discussions_phase_to_dir['final_output'], mentor_out_summary, GRANTNAME, 'mentor_out_summary')
