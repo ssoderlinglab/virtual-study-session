@@ -19,7 +19,8 @@ from virtual_lab.constants import (
     PUBMED_TOOL_NAME,
 )
 from virtual_lab.prompts import format_references
-
+import pathlib 
+import shutil
 
 def get_pubmed_central_article(
     pmcid: str, abstract_only: bool = False
@@ -361,7 +362,6 @@ def count_discussion_tokens(
     }
 
     for index, turn in enumerate(discussion):
-        print('type of turn', type(turn), 'contents of turn', turn)
         if turn["agent"] != "User":
             update_token_counts(
                 token_counts=token_counts,
@@ -504,8 +504,8 @@ def convert_messages_to_discussion(
 
         # Final fallback
         return "Assistant"
-     def _text(m: dict) -> str:
-            return extract_text(m)
+    def _text(m: dict) -> str:
+        return extract_text(m)
 
     def _agent(m: dict) -> str:
         return resolve_agent(m)
@@ -543,7 +543,6 @@ def load_summaries(discussion_paths: list[Path]) -> tuple[str, ...]:
         with open(discussion_path, "r") as file:
             discussion = json.load(file)
         summaries.append(get_summary(discussion))
-
     return tuple(summaries)
 
 
@@ -568,4 +567,19 @@ def save_meeting(
         for turn in discussion:
             file.write(f"## {turn['agent']}\n\n{turn['message']}\n\n")
 
+def get_recent_markdown(path: Path):
+    md_file = sorted(list(path.glob('*.md')))[-1] # 1, 2,3
+    with open(md_file, 'r', encoding='utf-8') as f:
+        content = f.read()
+    return content
 
+def write_final_summary(save_dir: Path, summary: str, grant_name: str, out_suffix: str):
+    save_dir.mkdir(parents=True, exist_ok=True)
+    with open(save_dir / f'{grant_name}_{out_suffix}.txt', 'w') as f:
+        print(summary, file=f)
+    return
+
+def clear_dir(save_dir: Path):
+    if save_dir.exists():
+        shutil.rmtree(save_dir)
+    return
