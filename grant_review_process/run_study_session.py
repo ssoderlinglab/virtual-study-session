@@ -38,7 +38,8 @@ from review_constants import (
     nih_score_anchors,
     GRANTNAME,
     reviewer_criteria,
-    my_grant
+    my_grant,
+    CLEAR_DIRS
 )
 
 ## my imports
@@ -55,16 +56,15 @@ else:
     from virtual_lab.run_meeting_original_assistantAPI import run_meeting
 
 ### clear directories
-for d in discussions_phase_to_dir:
-    clear_dir(discussions_phase_to_dir[d])
+if CLEAR_DIRS:
+    for d in discussions_phase_to_dir:
+        clear_dir(discussions_phase_to_dir[d])
 
 os.environ["TQDM_DISABLE"] = "1"
 
 # form_requirements = StringIO(open('/hpc/group/soderlinglab/tools/virtual-study-session/data/toy/form.txt').read()).getvalue()
 print('mygrant', my_grant[:100])
 
-ORCID_number = '0000-0002-7599-1430'
-study_section_chair.expertise += ORCID_number
 
 ## search for aims
 research_strategy = re.search(r'^(.*?)RESEARCH STRATEGY', my_grant, re.DOTALL | re.IGNORECASE)
@@ -74,57 +74,62 @@ if research_strategy:
 else:
     aims = ''
 
+
+def check_files(path: Path):
+    files = len(list(path.glob('*.json')))
+    return files >= num_rounds
 # ## Team selection
 # #### technicalities
 # - Chair talks to the reviewer 1,2,3; individual reviews return to chair, then looped into reviewer 4 and 5
 
-
 # Team selection - prompts
 team_selection_agenda = f"""You are simulating an NIH-style study section. The goal is to assemble a team of three reviewers 
-(primary, secondary, tertiary) who will help refine and strengthen my grant in accordance with 
-the NIH requirements. 
+    (primary, secondary, tertiary) who will help refine and strengthen my grant in accordance with 
+    the NIH requirements. 
 
-Your task is to select reviewers whose expertise aligns with the scientific scope and policy 
-requirements of the grant. Each reviewer should be described in terms of their role and domain 
-expertise rather than a personal identity. Their skills should collectively ensure a rigorous, 
-policy-compliant, and competitive proposal. 
+    Your task is to select reviewers whose expertise aligns with the scientific scope and policy 
+    requirements of the grant. Each reviewer should be described in terms of their role and domain 
+    expertise rather than a personal identity. Their skills should collectively ensure a rigorous, 
+    policy-compliant, and competitive proposal. 
 
-Use Retrieval Augmented Grounding (RAG) to ensure your selections reflect the most current NIH 
-guidelines and scientific literature. Reviewers should provide perspectives that are 
-well-informed, scientifically critical, and directly relevant to the proposal’s research aims {aims}.
+    Use Retrieval Augmented Grounding (RAG) to ensure your selections reflect the most current NIH 
+    guidelines and scientific literature. Reviewers should provide perspectives that are 
+    well-informed, scientifically critical, and directly relevant to the proposal’s research aims {aims}.
 
-Do not include the Study Section Chair (you). The Chair’s role is to oversee the process, guide 
-discussion, and ensure alignment with policy and criteria, but the selected reviewers should be 
-the primary contributors of domain-specific evaluation. 
+    Do not include the Study Section Chair (you). The Chair’s role is to oversee the process, guide 
+    discussion, and ensure alignment with policy and criteria, but the selected reviewers should be 
+    the primary contributors of domain-specific evaluation. 
 
-Please acknowledge which individual the ORCID_number is referencing, and how they contribute to the expertise of the overview
-process.
-Agent(
-    title="Study Section Chair",
-    expertise="Proposing Study to support research space of proposed Grant, my expertise is in Cell Biology",
-    goal="perform research in your area of expertise that maximizes the scientific impact of the proposed project to ensure project feasibility and success",
-    role="oversee the grant development process, ensure alignment with recent scientific literature, guide expert discussions, and maintain the overall coherence and competitiveness of the proposal"
-)
-"""
-
-# Team selection - discussion
-for iteration_num in range(num_iterations):
-    _, conversation_id = run_meeting(
-    meeting_type="individual",
-    team_member=study_section_chair,
-    agenda=team_selection_agenda,
-    save_dir=discussions_phase_to_dir["team_selection"] ,
-    save_name=f"discussion_{iteration_num + 1}",
-    temperature=CREATIVE_TEMPERATURE,
-    pubmed_search=True,
-    contexts=(f'my_grant: {my_grant}',),
-    conversation_id = conversation_id
+    Please acknowledge which individual the ORCID_number is referencing, and how they contribute to the expertise of the overview
+    process.
+    Agent(
+        title="Study Section Chair",
+        expertise="Proposing Study to support research space of proposed Grant, my expertise is in Cell Biology",
+        goal="perform research in your area of expertise that maximizes the scientific impact of the proposed project to ensure project feasibility and success",
+        role="oversee the grant development process, ensure alignment with recent scientific literature, guide expert discussions, and maintain the overall coherence and competitiveness of the proposal"
     )
-    time.sleep(5)
+    """
+
+if not check_files(discussions_phase_to_dir["team_selection"]):
+    # Team selection - discussion
+    for iteration_num in range(num_iterations):
+        _, conversation_id = run_meeting(
+        meeting_type="individual",
+        team_member=study_section_chair,
+        agenda=team_selection_agenda,
+        save_dir=discussions_phase_to_dir["team_selection"] ,
+        save_name=f"discussion_{iteration_num + 1}r",
+        temperature=CREATIVE_TEMPERATURE,
+        pubmed_search=True,
+        contexts=(f'my proposal: {my_grant}',),
+#         conversation_id = conversation_id
+        )
+        time.sleep(5)
 
 # Team selection - merge
 team_selection_summaries = load_summaries(
-    discussion_paths=sorted(list(discussions_phase_to_dir["team_selection"].glob("discussion_*.json"))))
+    discussion_paths=sorted(list(
+        discussions_phase_to_dir["team_selection"].glob("discussion_*.json"))))
 
 print(f"Number of summaries: {len(team_selection_summaries)}")
 
@@ -138,10 +143,9 @@ _, conversation_id = run_meeting(
     save_dir=discussions_phase_to_dir["team_selection"],
     save_name="merged",
     temperature=CONSISTENT_TEMPERATURE,
-    contexts=(f'Full text: {my_grant}',),
-    conversation_id = conversation_id
+    contexts=(f'Proposal: {my_grant}',),
+#     conversation_id = conversation_id
 )
-
 
 ## update team members
 team_members_selection_file = Path(discussions_phase_to_dir['team_selection']) / 'merged.json'
@@ -230,51 +234,46 @@ reviewers = (primary_reviewer, secondary_reviewer, tertiary_reviewer)
 fill_out_form= (f'1. Please fill out the bracketed [] areas in the following template for each aim: {grant_scoring_form}',
                f'2. Please provide a score for each factor in each aim!')
 
-
-for i, r in enumerate(reviewers):
-    for iteration_num in range(num_iterations):
-        run_meeting(
-            meeting_type="team",
-            team_lead=r,  # PI resolves/merges
-            team_members = (scientific_critic, reviewers[i+1 if i != len(reviewers)-1 else 0]),
-            agenda = reviewer_criteria,
-            agenda_questions = fill_out_form,
-            save_dir=discussions_phase_to_dir["independent_review"],
-            save_name=f"reviewer{i+1}_iter{iteration_num+1}", #            save_name=f"discussion_{iteration_num + 1}",
-        #     pubmed_search = True,
-            temperature=CONSISTENT_TEMPERATURE,
-            num_rounds=num_rounds,
-            contexts=(f'full text/propposal: : {my_grant}',),
-            conversation_id = conversation_id
-    )
-        time.sleep(5)
+if not check_files(discussions_phase_to_dir["independent_review"]):
+    for i, r in enumerate(reviewers):
+        for iteration_num in range(num_iterations):
+            _, conversation_id = run_meeting(
+                meeting_type="team",
+                team_lead=r,  # PI resolves/merges
+                team_members = (scientific_critic, reviewers[i+1 if i != len(reviewers)-1 else 0]),
+                agenda = reviewer_criteria,
+                agenda_questions = fill_out_form,
+                save_dir=discussions_phase_to_dir["independent_review"],
+                save_name=f"reviewer{i+1}", #            save_name=f"discussion_{iteration_num + 1}",
+            #     pubmed_search = True,
+                temperature=CONSISTENT_TEMPERATURE,
+                num_rounds=num_rounds,
+                contexts=(f'Proposal: {my_grant}',),
+#                 conversation_id = conversation_id
+        )
+            time.sleep(5)
 
 
 print('######## finished independent review selection!!!! ####### ')
 
-## converge all team members to debate 
-converge_summaries_agenda = '''Goal: Surface disagreements in the individual reviews, stress-test the reasoning, and converge to a clear, evidence-based consensus.
-Study Section Chair (neutral): runs the process, enforces ground rules.
-4) Ground rules (state at the start)
-Focus on evidence in the strengths and weaknesses. Cite text/data for each strength and weakness.
-One mic, equal airtime. Use round-robins; no interruptions in report-outs.
-Steelman first. Summarize the opposing view to their satisfaction before rebutting.
-Separate people from ideas. Critique arguments, not authors or reviewers.
-Meeting details:
-Begin with the Study Section Chair (SSC) restating the goal: to reach an evidence-based, written consensus for each Aim on NIH Factor 1 (Importance of the Research—significance and innovation) and Factor 2 (Rigor and Feasibility—soundness and realism of the approach, analyses, milestones, and risk-mitigation). The SSC shares a variance snapshot compiled from the individual reviews (initial F1/F2 scores by each reviewer and their top 2–3 strengths/weaknesses per Aim). Ground rules: cite the application (page/figure/section) for every claim; focus on the text as written (no external prestige or anecdotes); separate fixable concerns from “serious” or “fatal” flaws; keep turns brief and non-interruptive; disclose any lingering uncertainties explicitly.
-For each Aim, the SSC designates a speaking order. Reviewer 1 gives a neutral summary of the Aim’s objective and outcomes, then states their top strengths and weaknesses mapped to Factor 1 vs Factor 2 with citations. Reviewers 2 and 3 each surface true deltas—only what they see differently, not a full re-review. The Scientific Critic (SC) then poses ≤3 targeted probes aimed at the largest divergences (e.g., “Is this weakness conceptual novelty (F1) or execution risk (F2)?”, “Where are the quantitative benchmarks and fallback paths?”, “What evidence shows the proposed design is adequately powered/controlled?”). The SSC lists the points of disagreement on a shared screen/notepad in F1 vs F2 buckets.
-Resolve facts before opinions. When a claim is challenged, the group opens the cited text and agrees on what the application actually asserts; if information is missing or ambiguous, label that gap explicitly rather than inferring. The SC stress-tests feasibility and rigor: verify controls and comparators, statistics/power, data/analysis reproducibility, and cross-Aim resource dependencies. The SSC prevents double-counting by ensuring each issue lives in exactly one factor unless it has distinct, non-overlapping implications.
-Calibrate and converge. After clarifications, the SSC asks each reviewer for a quick revised range for F1 and F2 (e.g., “R1: F1 2–3; F2 4,” etc.) to de-anchor extremes. The SC runs a short counterfactual if needed (“If Aim 2 slips by one quarter, does Aim 1 still meet its benchmark?”) to test robustness. The SSC proposes a straw-man consensus for each factor—a one-sentence rationale plus up to three succinct evidence-backed bullets mixing strengths and weaknesses—and checks for agreement. Language must be neutral and actionable (e.g., “Major Strength: clearly articulated biological rationale with compelling preliminary data in Fig. 2 supporting mechanism X,” “Serious Concern: underpowered primary endpoint; no variance estimates or multiplicity plan specified”).
-Decide and document. Once consensus on text and score is reached, the SSC records the final F1 and F2 numeric scores (1–9) for the Aim and the agreed-upon rationale paragraphs. If not, the SSC records a majority score and a one-sentence dissent capturing the minority perspective with a single citation.
-Close the Aim with a quick quality check: confirm no issue is counted twice across factors, confirm that “fatal” vs “fixable” labeling is consistent with the rationale, and ensure cross-Aim dependencies are coherent (no double-commit of the same resource). Repeat for all Aims. At the end, the SSC fills out a new grant_scoring_form the per-Aim consensus statements and scores for F1 and F2 so reviewers 1–3 can align their individual forms accordingly (or leave a documented dissent). The final deliverable to be written by the SSC is a clean and detailed, per-Aim consensus narrative for Factor 1 and Factor 2—with page/figure citations and the agreed numeric scores—that accurately reflects the debate and can stand alone in the study section summary.'''
+## converge all team members to debate
+converge_summaries_agenda = '''Goal: Identify disagreements in individual reviews, test reasoning, and reach an evidence-based consensus. The Study Section Chair (SSC) facilitates discussion and enforces rules: focus on evidence, cite the application, give equal airtime, steelman opposing views, and critique ideas, not people.
+
+The SSC restates the goal and presents score/variance summaries for Factor 1 (Significance & Innovation) and Factor 2 (Rigor & Feasibility). For each Aim, Reviewer 1 neutrally summarizes and lists top strengths/weaknesses; Reviewers 2–3 highlight only true differences. The Scientific Critic (SC) probes major divergences. The group resolves factual disagreements by consulting the cited text and labeling gaps explicitly.
+
+After clarifications, reviewers recalibrate F1/F2 scores. The SC may test robustness with brief counterfactuals. The SSC then proposes a concise consensus: a one-sentence rationale plus up to three evidence-based bullets mixing strengths and weaknesses.
+
+Finally, the SSC records final scores and rationale, notes dissent if needed, ensures issues aren’t double-counted, and confirms consistency across Aims. Deliverable: a per-Aim consensus narrative for F1 and F2 with citations and numeric scores, ready for the study section summary.
+'''
 
 converge_summaries_questions = (
-'What exactly is the Aim’s objective, success benchmarks, and deliverables as written? (cite)',
-'What are the top 1–2 strengths and 1–2 concerns, mapped to Factor 1 (importance/innovation) vs Factor 2 (rigor/feasibility), and are concerns fixable or serious/fatal? (cite)?',
-'Where do Reviewers 2–3 disagree with Reviewer 1 (deltas only), and can each steelman the opposing view before rebutting? (cite)',
-'For each contested issue, is it fundamentally Factor 1 or Factor 2, and what concrete evidence (power/variance, controls/comparators, analyses, milestones, fallback paths) supports or undermines it? (cite)',
-'After resolving facts, what are your revised score ranges for Factor 1 and Factor 2, and what neutral one-sentence rationale + up to three evidence-backed bullets support the final numeric scores (or a one-line dissent with a single citation)?',
-'Debate the scores output from each reviewer and discuss which score to agree upon for each factor/aim correspondence.')
+    "What is the Aim’s stated goal, success criteria, and deliverables? (cite)",
+    "List the top 1–2 strengths and 1–2 weaknesses, mapped to Factor 1 (importance/innovation) and Factor 2 (rigor/feasibility). Are concerns fixable or major? (cite)",
+    "Where do Reviewers 2–3 differ from Reviewer 1? Summarize (steelman) opposing views before rebutting. (cite)",
+    "For each disputed point, is it a Factor 1 or Factor 2 issue? What evidence (e.g., power, controls, milestones) supports or refutes it? (cite)",
+    "After clarifications, what are your updated Factor 1 and Factor 2 score ranges, with a one-sentence rationale and up to three supporting bullets (or a brief dissent)?",
+    "Compare all reviewer scores and agree on the final scores for each Factor and Aim."
+)
 
 independent_summaries  = load_summaries(
     discussion_paths=sorted(list(discussions_phase_to_dir["independent_review"].glob("reviewer*.json"))))
@@ -284,28 +283,31 @@ print(f"Number of independent summaries: {len(independent_summaries)}")
 
 print('######## finished independent summary selection!!!! ####### ')
 
-for n_iter in range(num_iterations):
-        run_meeting(
-        meeting_type="team",
-        team_lead=study_section_chair,  # PI resolves/merges
-        team_members = team_members,
-        agenda = converge_summaries_agenda,
-        agenda_questions = converge_summaries_questions,
-        save_dir=discussions_phase_to_dir["collaboration_review"],
-        save_name=f"converge_{n_iter+1}",
-    #     pubmed_search = True,
-        summaries = independent_summaries,
-        temperature=CONSISTENT_TEMPERATURE,
-        num_rounds=num_rounds,
-        conversation_id = conversation_id)
-        time.sleep(5)
+if not check_files(discussions_phase_to_dir["collaboration_review"]):
+    for n_iter in range(num_iterations):
+            _, conversation_id = run_meeting(
+            meeting_type="team",
+            team_lead=study_section_chair,  # PI resolves/merges
+            team_members = team_members,
+            agenda = converge_summaries_agenda,
+            agenda_questions = converge_summaries_questions,
+            save_dir=discussions_phase_to_dir["collaboration_review"],
+            save_name=f"converge_{n_iter+1}",
+        #     pubmed_search = True,
+            summaries = independent_summaries,
+            temperature=CONSISTENT_TEMPERATURE,
+            num_rounds=num_rounds,
+            contexts=(f'Proposal: {my_grant}',),
+            conversation_id = conversation_id)
+            time.sleep(5)
         
 print('######## finished converging summaries!!!! ####### ')
 
 
 ## study section chair merges  
 collaboration_summaries  = load_summaries(
-    discussion_paths=sorted(list(discussions_phase_to_dir["collaboration_review"].glob("converge*.json"))))
+    discussion_paths=sorted(
+        list(discussions_phase_to_dir["collaboration_review"].glob("converge*.json"))))
 
 print(f"Number of collaboration summaries: {len(collaboration_summaries)}")
 
@@ -314,23 +316,24 @@ of summaries, and return it. Please elongate/define all abbreviations.'''
 final_output_questions = ('Provide an executive summary of the discussion',
                          'What are the consensus strengths for each aim?',
                          'What are the weaknesses that were retained?',
-                         'Provide detailed advice on how each aim could be improved based on the discussion points.')
-
-for n_iter in range(num_iterations):
-    run_meeting(
-    meeting_type="individual",
-    team_member=study_section_chair,  # PI resolves/merges
-    summaries=collaboration_summaries,
-    agenda=final_agenda,
-    agenda_questions= final_output_questions,
-    save_dir=discussions_phase_to_dir["chair_merge"],
-    save_name=f"final_{n_iter+1}",
-#     pubmed_search = True,
-    temperature=CONSISTENT_TEMPERATURE,
-    num_rounds=num_rounds,
-    conversation_id = conversation_id
-    )
-    time.sleep(5)
+                         'Provide detailed advice on how each aim could be improved based on the discussion points.',
+                         'What is the score within each aim for each factor?')
+if not check_files(discussions_phase_to_dir["chair_merge"]):
+    for n_iter in range(num_iterations):
+        _, conversation_id = run_meeting(
+        meeting_type="individual",
+        team_member=study_section_chair,  # PI resolves/merges
+        summaries=collaboration_summaries,
+        agenda=final_agenda,
+        agenda_questions= final_output_questions,
+        save_dir=discussions_phase_to_dir["chair_merge"],
+        save_name=f"final_{n_iter+1}",
+    #     pubmed_search = True,
+        temperature=CONSISTENT_TEMPERATURE,
+        num_rounds=num_rounds,
+        contexts=(f'Proposal: {my_grant}',),
+        )
+        time.sleep(5)
 
 print('######## study section chair has selected the final output ####### ')
 
@@ -342,7 +345,7 @@ final_output_summary = load_summaries(
 
 ## write out final summary
 final_summary = final_output_summary[-1]
-write_final_summary(discussions_phase_to_dir['final_output'], final_summary, GRANTNAME, 'chair_summary')
+write_final_summary(discussions_phase_to_dir['chair_merge'], final_summary, GRANTNAME, 'chair_summary')
 
 
 ## get last markdown file
@@ -355,10 +358,10 @@ mentor_agent = Agent(
         role=f"Act as a literary expert and return feedback on proposal based off {final_markdown} in letter format",
         model=model,)
 
-out_agenda = f'Please fill out the grant scoring form {grant_scoring_form} and concisely yet targettedly, provide feedback in formal letter format to PI who wrote proposal on strengths, weaknesses, likely NIH decision, significance, and scores in all depts. Please elongate/define all abbreviations.'
+out_agenda = f'Please fill out the grant scoring form {grant_scoring_form} specifically, and provide feedback in formal letter format to PI who wrote proposal on strengths, weaknesses, likely NIH decision, significance, and scores in all depts. Please elongate/define all abbreviations.'
 
-## run meeting with final markdown 
-run_meeting(
+## run meeting with final markdown
+_, conversation_id = run_meeting(
     meeting_type="individual",
     team_member=mentor_agent,  # PI resolves/merges
     summaries=(final_markdown,),
@@ -369,7 +372,9 @@ run_meeting(
     #     pubmed_search = True,
     temperature=CONSISTENT_TEMPERATURE,
     num_rounds=num_rounds,
-    conversation_id = conversation_id
+    contexts=(f'Proposal: {my_grant}',),
+
+#     conversation_id = conversation_id
     )
 
 
@@ -378,3 +383,4 @@ mentor_out_summary = load_summaries(
 ))[-1]
 
 write_final_summary(discussions_phase_to_dir['final_output'], mentor_out_summary, GRANTNAME, 'mentor_out_summary')
+

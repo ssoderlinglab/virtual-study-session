@@ -7,17 +7,18 @@ from virtual_lab.prompts import SCIENTIFIC_CRITIC
 from io import StringIO
 
 # Meetings constants
-num_iterations = 2
+num_iterations = 1
 num_rounds = 2
-
+CLEAR_DIRS = False
 # Models
 #"gpt-4o-2024-08-06"
 
-model = "gpt-5"
+model = "gpt-5-mini"
 model_mini = model + '-mini'
 
 ## my grant details
-grant_filepath = '/hpc/group/soderlinglab/tools/virtual-study-session/data/R35_MIRA_plan.txt'
+grant_filepath = '/hpc/group/soderlinglab/tools/virtual-study-session/data/toy/grant.txt'
+
 my_grant = StringIO(open(grant_filepath).read()).getvalue()
 
 # Discussion paths
