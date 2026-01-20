@@ -15,6 +15,10 @@ If you use the Virtual Lab, please cite our work as follows:
 
 Swanson, K., Wu, W., Bulaong, N.L. et al. The Virtual Lab of AI agents designs new SARS-CoV-2 nanobodies. *Nature* (2025). https://doi.org/10.1038/s41586-025-09442-9
 
+## Grant Review Agent
+
+This repository currently hosts an NIH-style grant-review “agent” built on top of Virtual Lab. The workflow lives in `grant_review_process/`, where `review_constants.py` defines the Study Section Chair, reviewer personas, NIH scoring prompts, and the grant text to analyze (default `data/toy/grant.txt`). The orchestration scripts (`run_study_session.py`, `tightline_ss.py`) run the agent through team selection, independent and collaborative review loops, chair-driven merges, and final scoring/letter-generation meetings. Running those flows produces transcripts and summaries under `grant_review_process/discussions/<grant_name>_<model>/` plus mentor/scoring outputs in `grant_review_process/final_output`, providing an auditable rehearsal of the grant’s review process for the grant agent work happening in this repo.
+
 
 ## Virtual Lab for nanobody design
 
