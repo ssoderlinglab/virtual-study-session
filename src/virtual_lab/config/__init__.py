@@ -1,18 +1,5 @@
-"""Constants for Virtual Lab (backward compatibility shim).
+"""Configuration management for Virtual Lab."""
 
-DEPRECATED: This module is maintained for backward compatibility only.
-Please import from virtual_lab.config.constants instead:
-
-    from virtual_lab.config.constants import (
-        DEFAULT_MODEL,
-        CONSISTENT_TEMPERATURE,
-        MODEL_TO_INPUT_PRICE_PER_TOKEN,
-    )
-"""
-
-import warnings
-
-# Re-export everything from the new location
 from virtual_lab.config.constants import (
     DEFAULT_MODEL,
     CONSISTENT_TEMPERATURE,
@@ -34,16 +21,15 @@ from virtual_lab.config.constants import (
     GRANT_SCORING_CRITERIA,
     DEFAULT_WORKFLOW_PHASES,
 )
-
-# Issue deprecation warning on import
-warnings.warn(
-    "Importing from virtual_lab.constants is deprecated. "
-    "Please import from virtual_lab.config.constants instead.",
-    DeprecationWarning,
-    stacklevel=2,
+from virtual_lab.config.settings import (
+    VirtualLabConfig,
+    get_config,
+    set_config,
+    reset_config,
 )
 
 __all__ = [
+    # Constants
     "DEFAULT_MODEL",
     "CONSISTENT_TEMPERATURE",
     "CREATIVE_TEMPERATURE",
@@ -63,4 +49,9 @@ __all__ = [
     "NIH_SCORE_ANCHORS",
     "GRANT_SCORING_CRITERIA",
     "DEFAULT_WORKFLOW_PHASES",
+    # Settings
+    "VirtualLabConfig",
+    "get_config",
+    "set_config",
+    "reset_config",
 ]

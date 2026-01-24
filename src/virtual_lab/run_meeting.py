@@ -1,15 +1,20 @@
-''"""Runs a meeting with LLM agents using the Responses API."""
+"""Runs a meeting with LLM agents using the Responses API."""
 
+from __future__ import annotations
+
+import json
+import os
 import time
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
-import openai
-from openai import OpenAI 
+import requests
 from tqdm import trange, tqdm
 
 from virtual_lab.agent import Agent
-from virtual_lab.constants import CONSISTENT_TEMPERATURE, PUBMED_TOOL_DESCRIPTION
+from virtual_lab.config.constants import CONSISTENT_TEMPERATURE, PUBMED_TOOL_DESCRIPTION
+from virtual_lab.core.exceptions import APIError, MeetingError, RateLimitError
+from virtual_lab.logging_config import get_logger
 from virtual_lab.prompts import (
     individual_meeting_agent_prompt,
     individual_meeting_critic_prompt,
@@ -21,73 +26,183 @@ from virtual_lab.prompts import (
     team_meeting_team_lead_final_prompt,
     team_meeting_team_member_prompt,
 )
-from virtual_lab.utils import (
+from virtual_lab.utils.messages import (
     convert_messages_to_discussion,
+    get_conversation_messages,
+)
+from virtual_lab.utils.tokens import (
     count_discussion_tokens,
-    count_tokens,
-    get_messages,
-    get_summary,
     print_cost_and_time,
-    run_tools,
+)
+from virtual_lab.utils.io import (
+    get_summary,
     save_meeting,
-    get_conversation_messages
 )
 
-from pprint import pprint
-from uuid import uuid4
-import os, requests, json,time
-import time, random, requests
+logger = get_logger(__name__)
 
 
-def create_conversation( headers):
-    w = f'https://api.openai.com/v1/conversations'
-    payload = {'items': [
-      {
-        "type": "message",
-        "role": "user",
-        "content": "Hello!"
-      }
-    ]}
-    r = requests.post(w, headers=headers, json=payload)
+def create_conversation(headers: dict[str, str]) -> dict[str, Any]:
+    """Create a new OpenAI conversation.
+
+    Args:
+        headers: HTTP headers including authorization.
+
+    Returns:
+        The conversation JSON response.
+
+    Raises:
+        APIError: If the conversation cannot be created.
+    """
+    url = "https://api.openai.com/v1/conversations"
+    payload = {
+        "items": [
+            {
+                "type": "message",
+                "role": "user",
+                "content": "Hello!"
+            }
+        ]
+    }
+
     try:
-         r.raise_for_status()
-    except requests.HTTPError:
+        response = requests.post(url, headers=headers, json=payload, timeout=30)
+        response.raise_for_status()
+        return response.json()
+    except requests.HTTPError as e:
+        error_body = ""
         try:
-            print(json.dumps(r.json(), indent=2))
+            error_body = json.dumps(response.json(), indent=2)
         except Exception:
-            print(r.text[:1000])
-    return r.json()
+            error_body = response.text[:1000]
+        logger.error(f"Failed to create conversation: {error_body}")
+        raise APIError(
+            f"Failed to create conversation: {e}",
+            status_code=response.status_code,
+            response_body=error_body,
+        ) from e
+    except requests.RequestException as e:
+        logger.error(f"Request error creating conversation: {e}")
+        raise APIError(f"Request error creating conversation: {e}") from e
 
-def post_response(payload: dict, BASE, HEADERS, meeting_type, meeting_genre, round_idx) -> dict:
-    RESPONSES =  f'{BASE}/responses' 
-    ## log probs is a param parameter.. 
-    params = {'include': ''}
-    
-#     r = requests.post(RESPONSES, headers=HEADERS,
-#                   json=payload)
-    r = post_with_retries(RESPONSES, headers=HEADERS, payload=payload, meeting_type=meeting_type, meeting_genre = meeting_genre, round_idx = round_idx)
+def post_response(
+    payload: dict[str, Any],
+    base_url: str,
+    headers: dict[str, str],
+    meeting_type: str,
+    meeting_genre: Path,
+    round_idx: int,
+) -> dict[str, Any]:
+    """Post a response request to the OpenAI API.
+
+    Args:
+        payload: The request payload.
+        base_url: The base API URL.
+        headers: HTTP headers including authorization.
+        meeting_type: Type of meeting for logging.
+        meeting_genre: Meeting directory for logging.
+        round_idx: Current round index for logging.
+
+    Returns:
+        The API response JSON.
+
+    Raises:
+        APIError: If the request fails after retries.
+    """
+    responses_url = f"{base_url}/responses"
+
+    response = post_with_retries(
+        responses_url,
+        headers=headers,
+        payload=payload,
+        meeting_type=meeting_type,
+        meeting_genre=meeting_genre,
+        round_idx=round_idx,
+    )
+
     try:
-        r.raise_for_status()
-    except requests.HTTPError:
-        print('status: ', r.status_code)
+        response.raise_for_status()
+        return response.json()
+    except requests.HTTPError as e:
+        error_body = ""
         try:
-            p =  r.json()
-            print('failing json: ', p)
+            error_body = json.dumps(response.json(), indent=2)
+            logger.error(f"API error response: {error_body}")
         except Exception:
-            print('failed to do json dump')
-            print(r.text[:1000])
-        raise
-    return r.json()
+            error_body = response.text[:1000]
+            logger.error(f"API error (raw): {error_body}")
 
-def post_with_retries(responses, headers, payload, meeting_type, meeting_genre, round_idx, max_tries=6, base=0.6):
-    for i in range(max_tries):
-        r = requests.post(responses, headers=headers,
-              json=payload)
-        if r.status_code < 500 and r.status_code not in (408, 429):
-            return r
-        time.sleep(10)
-        print(f'{meeting_type}, {meeting_genre.stem} on round {round_idx} failed')
-    return r
+        if response.status_code == 429:
+            raise RateLimitError(
+                "Rate limit exceeded",
+                status_code=response.status_code,
+                response_body=error_body,
+            ) from e
+
+        raise APIError(
+            f"API request failed: {e}",
+            status_code=response.status_code,
+            response_body=error_body,
+        ) from e
+
+
+def post_with_retries(
+    url: str,
+    headers: dict[str, str],
+    payload: dict[str, Any],
+    meeting_type: str,
+    meeting_genre: Path,
+    round_idx: int,
+    max_tries: int = 6,
+    base_delay: float = 10.0,
+) -> requests.Response:
+    """Post a request with exponential backoff retries.
+
+    Args:
+        url: The URL to post to.
+        headers: HTTP headers.
+        payload: Request payload.
+        meeting_type: Type of meeting for logging.
+        meeting_genre: Meeting directory for logging.
+        round_idx: Current round index for logging.
+        max_tries: Maximum number of retry attempts.
+        base_delay: Base delay between retries in seconds.
+
+    Returns:
+        The response object.
+    """
+    last_response = None
+
+    for attempt in range(max_tries):
+        try:
+            response = requests.post(url, headers=headers, json=payload, timeout=120)
+
+            # Success or non-retryable error
+            if response.status_code < 500 and response.status_code not in (408, 429):
+                return response
+
+            last_response = response
+            logger.warning(
+                f"Retryable error on {meeting_type} {meeting_genre.stem} "
+                f"round {round_idx}: status {response.status_code} "
+                f"(attempt {attempt + 1}/{max_tries})"
+            )
+
+        except requests.RequestException as e:
+            logger.warning(
+                f"Request exception on {meeting_type} {meeting_genre.stem} "
+                f"round {round_idx}: {e} (attempt {attempt + 1}/{max_tries})"
+            )
+
+        # Wait before retry (exponential backoff would be better)
+        if attempt < max_tries - 1:
+            time.sleep(base_delay)
+
+    if last_response is not None:
+        return last_response
+
+    # Should not reach here, but return empty response as fallback
+    raise APIError(f"All {max_tries} retry attempts failed")
 
 
 def run_meeting(
@@ -109,7 +224,7 @@ def run_meeting(
     OVERALL_MODEL: str = 'gpt-5',
     OVERALL_MINI_MODEL: str= 'gpt-5 mini',
     conversation_id: Optional[str]=None
-) -> str:
+) -> tuple[str | tuple[()], str]:
     """Runs a meeting with LLM agents using the Responses API.
 
     :param meeting_type: The type of meeting.
@@ -183,7 +298,7 @@ def run_meeting(
                   'model': agent.model,
                   'conversation': conversation_id,
                   'truncation': 'auto'}
-        r_json = post_response(payload, BASE=BASE, HEADERS=HEADERS, meeting_type=meeting_type, meeting_genre=save_dir, round_idx=0)
+        r_json = post_response(payload, base_url=BASE, headers=HEADERS, meeting_type=meeting_type, meeting_genre=save_dir, round_idx=0)
         agent_to_assistant[agent] = r_json ## need to return the message only?
 
 
@@ -270,63 +385,47 @@ def run_meeting(
                       # 'previous_response_id': agent_to_assistant[agent]['id'],
                       'conversation': conversation_id, 
                       'truncation': 'auto'}
-            run = post_response(payload, BASE=BASE, HEADERS=HEADERS, meeting_type=meeting_type, meeting_genre=save_dir, round_idx=round_num)
-            if run['status'] == 'requires_action':
-                print('a TOOL  is BEING USED, setup not completed for pubmed tool with gpt-5. This is'
-                     ' still on assistants api, so client.beta.threads.runs.submit_tool_outputs_and_poll')
-#                 tool_outputs = run_tools(run=run)
-                
-#                                 # Update tool token count
-#                 tool_token_count += sum(
-#                     count_tokens(tool_output["output"]) for tool_output in tool_outputs
-#                 )
+            run = post_response(
+                payload,
+                base_url=BASE,
+                headers=HEADERS,
+                meeting_type=meeting_type,
+                meeting_genre=save_dir,
+                round_idx=round_num,
+            )
 
-#                                 # Submit the tool outputs
-#                 run = client.beta.threads.runs.submit_tool_outputs_and_poll(
-#                     thread_id=thread.id, run_id=run.id, tool_outputs=tool_outputs
-#                 )
+            # Handle tool calls (PubMed search)
+            if run.get('status') == 'requires_action':
+                logger.warning(
+                    "Tool action required but not implemented for gpt-5. "
+                    "PubMed tool support requires Assistants API."
+                )
+                # TODO: Implement tool handling for Responses API when available
 
-#                 # Add tool outputs to the thread so it's visible for later rounds
-#                 client.beta.threads.messages.create(
-#                     thread_id=thread.id,
-#                     role="user",
-#                     content="Tool Output:\n\n"
-#                     + "\n\n".join(
-#                         tool_output["output"] for tool_output in tool_outputs
-#                     ),
-#                 )
-            
-            if run['status'] != "completed":
-                #### RUN IS NOW A DICTIONARY-- NO ATTRIBUTES
-                print("[run] status:", getattr(run, "status", None))
-                print("[run] id:", getattr(run, "id", None))
-                print("[run] model:", getattr(run, "model", None))
-                print("[run] usage:", getattr(run, "usage", None))
+            # Check for run failure
+            if run.get('status') != "completed":
+                run_status = run.get('status', 'unknown')
+                run_id = run.get('id', 'unknown')
+                last_error = run.get('last_error')
+                error_details = run.get('error')
 
-                # most APIs expose one or more of these on failure:
-                print("[run] last_error:", getattr(run, "last_error", None))
-                print("[run] error:", getattr(run, "error", None))
-                print("[run] incomplete_details:", getattr(run, "incomplete_details", None))
-                print("[run] required_action:", getattr(run, "required_action", None))
+                logger.error(
+                    f"Run failed: status={run_status}, id={run_id}, "
+                    f"last_error={last_error}, error={error_details}"
+                )
 
-                # tails (if present)
-                tail_msgs = getattr(run, "output_messages", None)
-                if tail_msgs is not None:
-                    print("[run] output_messages tail:")
-                    pprint(tail_msgs[-3:])
-
-                tail_tools = getattr(run, "tool_outputs", None)
-                if tail_tools is not None:
-                    print("[run] tool_outputs tail:")
-                    pprint(tail_tools[-3:])
-
-                # as a catch-all: shows any other attrs if it's a normal object
-                try:
-                    print("[run] __dict__ keys:", list(vars(run).keys()))
-                except TypeError:
-                    pass
-                print(f'run failed at, {run.failed_at}\n\nLast error: {run.last_error}')
-                raise ValueError(f"Run failed: {run.status}")
+                raise MeetingError(
+                    f"Run failed with status: {run_status}",
+                    meeting_type=meeting_type,
+                    phase=f"round_{round_num}",
+                    conversation_id=conversation_id,
+                    details={
+                        "run_id": run_id,
+                        "status": run_status,
+                        "last_error": last_error,
+                        "error": error_details,
+                    },
+                )
             # If final round, only team lead or team member responds
             if round_index == num_rounds:
                 break
